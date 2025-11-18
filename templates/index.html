@@ -1,0 +1,616 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Gyges - Audio Data Transmitter</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>🎵 Gyges Audio Data Transmitter</h1>
+            <p class="subtitle">Generate audio waveforms from data using ggwave</p>
+        </header>
+
+        <div class="main-content">
+            <!-- Status Panel -->
+            <div class="status-panel">
+                <h2>Status</h2>
+                <div id="status-display" class="status-display idle">
+                    <span class="status-text">Ready</span>
+                </div>
+                <div id="status-message" class="status-message"></div>
+            </div>
+
+            <!-- Generation Controls -->
+            <div class="controls-panel">
+                <h2>Generate Waveform</h2>
+                
+                <!-- Encoder Settings -->
+                <div class="input-section">
+                    <label for="encoder-select">Encoder:</label>
+                    <select id="encoder-select" class="form-select">
+                        <option value="auto">Auto (Default)</option>
+                        <option value="simple_fsk">Simple FSK</option>
+                    </select>
+                    
+                    <div id="fsk-params" class="param-group" style="display: none;">
+                        <label>FSK Parameters:</label>
+                        <small style="color: #e67e22; display: block; margin-bottom: 10px;">⚠️ FSK limited by 50MB WAV size. Lower bit duration = more data fits.</small>
+                        <div class="param-row">
+                            <label>Bit Duration (ms):</label>
+                            <input type="range" id="bit-duration" min="5" max="50" value="10" step="1">
+                            <span id="bit-duration-val">10</span>
+                        </div>
+                        <div class="param-row">
+                            <label>Freq 0 (Hz):</label>
+                            <input type="number" id="freq-0" value="1200" min="500" max="3000" step="100">
+                        </div>
+                        <div class="param-row">
+                            <label>Freq 1 (Hz):</label>
+                            <input type="number" id="freq-1" value="1800" min="500" max="3000" step="100">
+                        </div>
+                    </div>
+                    
+                    <div id="ggwave-params" class="param-group" style="display: none;">
+                        <label>GGWave Parameters:</label>
+                        <small style="color: #e67e22; display: block; margin-bottom: 10px;">⚠️ GGWave limited to 140 bytes. Use FSK for larger data.</small>
+                        <div class="param-row">
+                            <label>Protocol:</label>
+                            <select id="ggwave-protocol" class="form-select" style="margin: 0;">
+                                <option value="0">Audible Normal</option>
+                                <option value="1" selected>Audible Fast</option>
+                                <option value="2">Audible Fastest</option>
+                            </select>
+                        </div>
+                        <div class="param-row">
+                            <label>Volume (%):</label>
+                            <input type="range" id="ggwave-volume" min="10" max="100" value="50" step="5">
+                            <span id="ggwave-volume-val">50</span>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- Text Input -->
+                <div class="input-section">
+                    <label for="text-input">Text Message:</label>
+                    <textarea id="text-input" placeholder="Enter text to generate audio waveform..." rows="4"></textarea>
+                    <button id="generate-text-btn" class="btn btn-primary">Generate from Text</button>
+                </div>
+
+                <!-- File Upload -->
+                <div class="input-section">
+                    <label for="file-input">File:</label>
+                    <input type="file" id="file-input" accept="*/*">
+                    <button id="generate-file-btn" class="btn btn-primary">Generate from File</button>
+                </div>
+
+                <!-- Playback Control -->
+                <div class="control-buttons">
+                    <button id="stop-btn" class="btn btn-danger" disabled>Stop Playback</button>
+                </div>
+            </div>
+
+            <!-- Decode Section -->
+            <div class="controls-panel">
+                <h2>Decode Audio</h2>
+                <div class="input-section">
+                    <label for="decode-input">Upload WAV File:</label>
+                    <input type="file" id="decode-input" accept=".wav,audio/wav">
+                    
+                    <label for="decode-filename">Output Filename (optional):</label>
+                    <input type="text" id="decode-filename" class="form-input" placeholder="e.g., photo.jpg, document.pdf, data.bin">
+                    <small style="color: #666;">Leave empty to auto-detect (.txt for text, .bin for binary)</small>
+                    
+                    <label for="decode-method">Decoder:</label>
+                    <select id="decode-method" class="form-select">
+                        <option value="auto">Auto-detect (try all)</option>
+                        <option value="ggwave">GGWave</option>
+                        <option value="simple_fsk">Simple FSK</option>
+                    </select>
+                    
+                    <div id="fsk-decode-params" class="param-group" style="display: none; margin-top: 10px;">
+                        <small style="color: #666; display: block; margin-bottom: 10px;">ℹ️ FSK decoder will use the same parameters as the encoder (see above)</small>
+                    </div>
+                    
+                    <button id="decode-btn" class="btn btn-primary">Decode Audio</button>
+                </div>
+            </div>
+
+            <!-- History -->
+            <div class="history-panel">
+                <div class="history-header">
+                    <h2>History</h2>
+                    <button id="clear-history-btn" class="btn btn-danger btn-sm">Clear All</button>
+                </div>
+                <div id="history-container" class="history-list">
+                    <div class="loading">Loading...</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Error Modal -->
+    <div id="error-modal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3>⚠️ Error</h3>
+                <span class="modal-close" onclick="closeErrorModal()">&times;</span>
+            </div>
+            <div class="modal-body">
+                <p id="error-message"></p>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-primary" onclick="closeErrorModal()">OK</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // State
+        let state = {
+            uploadedFileData: null,
+            uploadedFileName: null,
+            isPlaying: false
+        };
+
+        // Initialize on page load
+        document.addEventListener('DOMContentLoaded', function() {
+            setupEventHandlers();
+            loadAvailableEncoders();
+            loadHistory();
+            startStatusPolling();
+        });
+        
+        // Modal functions
+        function showErrorModal(message) {
+            document.getElementById('error-message').textContent = message;
+            document.getElementById('error-modal').style.display = 'flex';
+        }
+        
+        function closeErrorModal() {
+            document.getElementById('error-modal').style.display = 'none';
+        }
+        
+        // Close modal when clicking outside
+        window.onclick = function(event) {
+            const modal = document.getElementById('error-modal');
+            if (event.target === modal) {
+                closeErrorModal();
+            }
+        };
+
+        // Event handlers
+        function setupEventHandlers() {
+            document.getElementById('generate-text-btn').addEventListener('click', generateFromText);
+            document.getElementById('generate-file-btn').addEventListener('click', generateFromFile);
+            document.getElementById('stop-btn').addEventListener('click', stopPlayback);
+            document.getElementById('clear-history-btn').addEventListener('click', clearHistory);
+            document.getElementById('decode-btn').addEventListener('click', decodeAudio);
+            
+            // Parameter controls
+            document.getElementById('bit-duration').addEventListener('input', function(e) {
+                document.getElementById('bit-duration-val').textContent = e.target.value;
+                saveEncoderParams();
+            });
+            document.getElementById('freq-0').addEventListener('change', saveEncoderParams);
+            document.getElementById('freq-1').addEventListener('change', saveEncoderParams);
+            document.getElementById('ggwave-protocol').addEventListener('change', saveEncoderParams);
+            document.getElementById('ggwave-volume').addEventListener('input', function(e) {
+                document.getElementById('ggwave-volume-val').textContent = e.target.value;
+                saveEncoderParams();
+            });
+            document.getElementById('encoder-select').addEventListener('change', function(e) {
+                document.getElementById('fsk-params').style.display = 
+                    e.target.value === 'simple_fsk' ? 'block' : 'none';
+                document.getElementById('ggwave-params').style.display = 
+                    e.target.value === 'ggwave' ? 'block' : 'none';
+                saveEncoderParams();
+            });
+            
+            // Decoder method change
+            document.getElementById('decode-method').addEventListener('change', function(e) {
+                const showFskParams = (e.target.value === 'simple_fsk' || e.target.value === 'auto');
+                document.getElementById('fsk-decode-params').style.display = 
+                    showFskParams ? 'block' : 'none';
+            });
+            
+            
+            loadEncoderParams();
+        }
+        
+        function saveEncoderParams() {
+            const params = {
+                encoder: document.getElementById('encoder-select').value,
+                bitDuration: parseInt(document.getElementById('bit-duration').value),
+                freq0: parseInt(document.getElementById('freq-0').value),
+                freq1: parseInt(document.getElementById('freq-1').value),
+                ggwaveProtocol: parseInt(document.getElementById('ggwave-protocol').value),
+                ggwaveVolume: parseInt(document.getElementById('ggwave-volume').value)
+            };
+            localStorage.setItem('encoderParams', JSON.stringify(params));
+        }
+        
+        function loadEncoderParams() {
+            const saved = localStorage.getItem('encoderParams');
+            if (saved) {
+                const params = JSON.parse(saved);
+                const encoder = params.encoder || 'auto';
+                document.getElementById('encoder-select').value = encoder;
+                document.getElementById('bit-duration').value = params.bitDuration || 10;
+                document.getElementById('bit-duration-val').textContent = params.bitDuration || 10;
+                document.getElementById('freq-0').value = params.freq0 || 1200;
+                document.getElementById('freq-1').value = params.freq1 || 1800;
+                document.getElementById('ggwave-protocol').value = params.ggwaveProtocol || 1;
+                document.getElementById('ggwave-volume').value = params.ggwaveVolume || 50;
+                document.getElementById('ggwave-volume-val').textContent = params.ggwaveVolume || 50;
+                document.getElementById('fsk-params').style.display = 
+                    encoder === 'simple_fsk' ? 'block' : 'none';
+                document.getElementById('ggwave-params').style.display = 
+                    encoder === 'ggwave' ? 'block' : 'none';
+            }
+        }
+        
+        function loadAvailableEncoders() {
+            fetch('/encoders')
+            .then(r => r.json())
+            .then(data => {
+                if (data.success) {
+                    const select = document.getElementById('encoder-select');
+                    select.innerHTML = data.encoders.map(enc => 
+                        `<option value="${enc}">${enc.replace('_', ' ').toUpperCase()}</option>`
+                    ).join('');
+                    
+                    // Load saved params after populating
+                    loadEncoderParams();
+                }
+            })
+            .catch(err => console.error('Failed to load encoders:', err));
+        }
+        
+        function decodeAudio() {
+            const fileInput = document.getElementById('decode-input');
+            const file = fileInput.files[0];
+            
+            if (!file) {
+                showStatus('error', 'Please select a WAV file', true);
+                return;
+            }
+            
+            const decodeMethod = document.getElementById('decode-method').value;
+            const customFilename = document.getElementById('decode-filename').value.trim();
+            
+            showStatus('generating', 'Decoding audio...');
+            
+            const formData = new FormData();
+            formData.append('audio_file', file);
+            formData.append('decoder', decodeMethod);
+            
+            // Add custom filename if provided
+            if (customFilename) {
+                formData.append('output_filename', customFilename);
+            }
+            
+            // Add FSK parameters if FSK decoder is selected or auto (must match encoder params)
+            if (decodeMethod === 'simple_fsk' || decodeMethod === 'auto') {
+                // Use the ENCODER bit duration value to ensure they match
+                formData.append('fsk_bit_duration', document.getElementById('bit-duration').value);
+                formData.append('fsk_freq_0', document.getElementById('freq-0').value);
+                formData.append('fsk_freq_1', document.getElementById('freq-1').value);
+            }
+            
+            fetch('/decode', {
+                method: 'POST',
+                body: formData
+            })
+            .then(r => r.json())
+            .then(data => {
+                if (data.success) {
+                    showStatus('success', `Decoded: ${data.preview}`);
+                    fileInput.value = '';
+                    document.getElementById('decode-filename').value = '';
+                    loadHistory();
+                } else {
+                    showStatus('error', data.error || 'Decode failed', true);
+                }
+            })
+            .catch(err => {
+                showStatus('error', 'Network error: ' + err.message, true);
+            });
+        }
+
+        // Generate from text
+        function generateFromText() {
+            const text = document.getElementById('text-input').value.trim();
+            if (!text) {
+                showStatus('error', 'Please enter some text', true);
+                return;
+            }
+
+            showStatus('generating', 'Generating waveform...');
+
+            const params = {
+                text: text,
+                encoder: document.getElementById('encoder-select').value,
+                fsk_params: {
+                    bit_duration: parseInt(document.getElementById('bit-duration').value) / 1000,
+                    freq_0: parseInt(document.getElementById('freq-0').value),
+                    freq_1: parseInt(document.getElementById('freq-1').value)
+                },
+                ggwave_params: {
+                    protocol: parseInt(document.getElementById('ggwave-protocol').value),
+                    volume: parseInt(document.getElementById('ggwave-volume').value)
+                }
+            };
+
+            fetch('/generate', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(params)
+            })
+            .then(r => r.json())
+            .then(data => {
+                if (data.success) {
+                    showStatus('success', `Generated transmission #${data.transmission_id}`);
+                    document.getElementById('text-input').value = '';
+                    loadHistory();
+                } else {
+                    showStatus('idle', 'Ready');
+                    showErrorModal(data.error || 'Generation failed');
+                }
+            })
+            .catch(err => {
+                showStatus('idle', 'Ready');
+                showErrorModal('Network error: ' + err.message);
+            });
+        }
+
+        // Generate from file
+        function generateFromFile() {
+            const fileInput = document.getElementById('file-input');
+            const file = fileInput.files[0];
+            
+            if (!file) {
+                showStatus('error', 'Please select a file', true);
+                return;
+            }
+
+            showStatus('uploading', 'Reading file...');
+
+            const reader = new FileReader();
+            reader.onload = function(e) {
+                // Properly encode binary data to base64 (handles all byte values 0-255)
+                const bytes = new Uint8Array(e.target.result);
+                let binary = '';
+                for (let i = 0; i < bytes.length; i++) {
+                    binary += String.fromCharCode(bytes[i]);
+                }
+                const fileData = btoa(binary);
+                
+                showStatus('generating', 'Generating waveform...');
+                
+            const params = {
+                file_data: fileData,
+                filename: file.name,
+                encoder: document.getElementById('encoder-select').value,
+                fsk_params: {
+                    bit_duration: parseInt(document.getElementById('bit-duration').value) / 1000,
+                    freq_0: parseInt(document.getElementById('freq-0').value),
+                    freq_1: parseInt(document.getElementById('freq-1').value)
+                },
+                ggwave_params: {
+                    protocol: parseInt(document.getElementById('ggwave-protocol').value),
+                    volume: parseInt(document.getElementById('ggwave-volume').value)
+                }
+            };
+
+            fetch('/generate', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(params)
+            })
+                .then(r => r.json())
+                .then(data => {
+                    if (data.success) {
+                        showStatus('success', `Generated transmission #${data.transmission_id}`);
+                        fileInput.value = '';
+                        loadHistory();
+                    } else {
+                        showStatus('idle', 'Ready');
+                        showErrorModal(data.error || 'Generation failed');
+                    }
+                })
+                .catch(err => {
+                    showStatus('idle', 'Ready');
+                    showErrorModal('Network error: ' + err.message);
+                });
+            };
+            reader.onerror = function() {
+                showStatus('idle', 'Ready');
+                showErrorModal('Failed to read file');
+            };
+            reader.readAsArrayBuffer(file);
+        }
+
+        // Play transmission
+        function playTransmission(id) {
+            showStatus('playing', 'Playing transmission...');
+            document.getElementById('stop-btn').disabled = false;
+
+            fetch(`/play/${id}`, { method: 'POST' })
+            .then(r => r.json())
+            .then(data => {
+                if (!data.success) {
+                    showStatus('error', data.error || 'Playback failed', true);
+                    document.getElementById('stop-btn').disabled = true;
+                }
+            })
+            .catch(err => {
+                showStatus('error', 'Network error: ' + err.message, true);
+                document.getElementById('stop-btn').disabled = true;
+            });
+        }
+
+        // Stop playback
+        function stopPlayback() {
+            fetch('/stop', { method: 'POST' })
+            .then(r => r.json())
+            .then(data => {
+                if (data.success) {
+                    showStatus('idle', 'Playback stopped');
+                    document.getElementById('stop-btn').disabled = true;
+                }
+            });
+        }
+
+        // Delete transmission
+        function deleteTransmission(id) {
+            if (!confirm('Delete this transmission?')) return;
+
+            fetch(`/delete/${id}`, { method: 'DELETE' })
+            .then(r => r.json())
+            .then(data => {
+                if (data.success) {
+                    showStatus('success', 'Transmission deleted');
+                    loadHistory();
+                } else {
+                    showStatus('error', data.error || 'Delete failed', true);
+                }
+            })
+            .catch(err => {
+                showStatus('error', 'Network error: ' + err.message, true);
+            });
+        }
+
+        // Clear history
+        function clearHistory() {
+            if (!confirm('Clear ALL history? This cannot be undone.')) return;
+
+            fetch('/clear-history', { method: 'POST' })
+            .then(r => r.json())
+            .then(data => {
+                if (data.success) {
+                    showStatus('success', `Cleared ${data.deleted_count} transmission(s)`);
+                    loadHistory();
+                } else {
+                    showStatus('error', data.error || 'Clear failed', true);
+                }
+            });
+        }
+
+        // Load history
+        function loadHistory() {
+            fetch('/history?limit=50')
+            .then(r => r.json())
+            .then(data => {
+                if (data.success) {
+                    displayHistory(data.history);
+                } else {
+                    document.getElementById('history-container').innerHTML = 
+                        '<div class="error">Failed to load history</div>';
+                }
+            })
+            .catch(err => {
+                document.getElementById('history-container').innerHTML = 
+                    '<div class="error">Network error loading history</div>';
+            });
+        }
+
+        // Display history
+        function displayHistory(history) {
+            const container = document.getElementById('history-container');
+            
+            if (!history || history.length === 0) {
+                container.innerHTML = '<div class="empty">No transmissions yet</div>';
+                return;
+            }
+
+            container.innerHTML = history.map(entry => {
+                const date = new Date(entry.timestamp).toLocaleString();
+                const preview = escapeHtml(entry.input_preview);
+                const metadata = entry.metadata || {};
+                const encoder = metadata.encoder_backend || metadata.encoder || 'simple_fsk';
+                const duration = entry.waveform_size ? (entry.waveform_size / 48000).toFixed(2) : 'N/A';
+                const size = entry.input_size < 1024 ? entry.input_size + 'B' : (entry.input_size / 1024).toFixed(1) + 'KB';
+                const isDecoded = entry.input_type.includes('decoded');
+                
+                return `
+                    <div class="history-entry ${isDecoded ? 'decoded-entry' : ''}">
+                        <div class="history-info">
+                            <span class="history-type">${entry.input_type.toUpperCase()}</span>
+                            <span class="history-content">${preview}</span>
+                            <span class="history-time">${date}</span>
+                        </div>
+                        <div class="history-meta">
+                            ${isDecoded ? '🔓 Decoded | ' : ''}Encoder: ${encoder} | Duration: ${duration}s | Size: ${size}
+                        </div>
+                        <div class="history-actions">
+                            <button class="btn-play" onclick="playTransmission(${entry.id})">▶ Play</button>
+                            ${isDecoded ? 
+                                '<button class="btn-download" onclick="window.location.href=\'/download-data/' + entry.id + '\'">📄 Decoded Data</button>' :
+                                '<button class="btn-download" onclick="window.location.href=\'/download-wav/' + entry.id + '\'">💾 WAV</button><button class="btn-download" onclick="window.location.href=\'/download-data/' + entry.id + '\'">📄 Data</button>'
+                            }
+                            <button class="btn-delete" onclick="deleteTransmission(${entry.id})">Delete</button>
+                        </div>
+                    </div>
+                `;
+            }).join('');
+        }
+
+        // Status polling
+        function startStatusPolling() {
+            setInterval(() => {
+                fetch('/status')
+                .then(r => r.json())
+                .then(data => {
+                    if (data.status === 'transmitting' && !state.isPlaying) {
+                        state.isPlaying = true;
+                        document.getElementById('stop-btn').disabled = false;
+                    } else if (data.status === 'completed') {
+                        if (state.isPlaying) {
+                            showStatus('success', 'Playback completed');
+                            state.isPlaying = false;
+                        }
+                        document.getElementById('stop-btn').disabled = true;
+                    } else if (data.status === 'idle') {
+                        if (state.isPlaying) {
+                            state.isPlaying = false;
+                        }
+                        document.getElementById('stop-btn').disabled = true;
+                    }
+                });
+            }, 1000);
+        }
+
+        // Show status
+        function showStatus(type, message, persistent = false) {
+            const display = document.getElementById('status-display');
+            const messageEl = document.getElementById('status-message');
+            
+            display.className = 'status-display ' + type;
+            display.querySelector('.status-text').textContent = 
+                type.charAt(0).toUpperCase() + type.slice(1);
+            messageEl.textContent = message;
+            
+            // Clear after delay unless persistent or playing
+            if (!persistent && type !== 'playing' && type !== 'generating') {
+                setTimeout(() => {
+                    if (display.className.includes(type)) {
+                        display.className = 'status-display idle';
+                        display.querySelector('.status-text').textContent = 'Ready';
+                        messageEl.textContent = '';
+                    }
+                }, 3000);
+            }
+        }
+
+        // Utility
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+    </script>
+</body>
+</html>
