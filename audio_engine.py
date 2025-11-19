@@ -6,6 +6,10 @@ import queue
 import logging
 import io
 import wave
+import subprocess
+import tempfile
+import os
+from pathlib import Path
 from typing import Optional, Callable, Tuple, Dict, Any
 import numpy as np
 from scipy import signal as scipy_signal
@@ -23,30 +27,30 @@ except ImportError:
     except ImportError:
         raise ImportError("Neither pyaudio nor sounddevice is available. Please install one: pip install pyaudio or pip install sounddevice")
 
-# Try multiple encoding backends
+# Encoder backend detection
 ENCODER_BACKEND = None
-ENCODER_MODULE = None
 
-# Try ggwave-wheels first (most reliable)
-try:
-    import ggwave
-    ENCODER_BACKEND = "ggwave_wheels"
-    ENCODER_MODULE = "ggwave"
+# Check for gyges_cpp.exe binary (for ggwave encoding)
+GYGES_CPP_PATH = None
+possible_paths = [
+    Path(__file__).parent / "bin" / "Release" / "gyges_cpp.exe",
+    Path(__file__).parent / "bin" / "Debug" / "gyges_cpp.exe",
+    Path(__file__).parent / "bin" / "MinSizeRel" / "gyges_cpp.exe",
+]
+
+for path in possible_paths:
+    if path.exists():
+        GYGES_CPP_PATH = path
+        ENCODER_BACKEND = "ggwave_cpp"
+        logger = logging.getLogger(__name__)
+        logger.info(f"Found gyges_cpp binary at {path}")
+        break
+
+if ENCODER_BACKEND is None:
+    # Fallback to simple FSK encoding
+    ENCODER_BACKEND = "simple_fsk"
     logger = logging.getLogger(__name__)
-    logger.info("Using ggwave-wheels backend")
-except ImportError:
-    # Try ggwave-python
-    try:
-        from ggwave_python import GGWave, ProtocolId
-        ENCODER_BACKEND = "ggwave_python"
-        ENCODER_MODULE = "ggwave_python"
-        logger = logging.getLogger(__name__)
-        logger.info("Using ggwave-python backend")
-    except ImportError:
-        # Fallback to simple FSK encoding
-        ENCODER_BACKEND = "simple_fsk"
-        logger = logging.getLogger(__name__)
-        logger.warning("No encoding library found. Using simple FSK encoding. Install ggwave-wheels for better performance: pip install ggwave-wheels")
+    logger.warning("No gyges_cpp binary found. Using simple FSK encoding only.")
 
 from config import config
 
@@ -54,6 +58,10 @@ logger = logging.getLogger(__name__)
 
 # Amodem removed due to unreliable API
 AMODEM_AVAILABLE = False
+
+# Audio conversion constants
+INT16_MAX = 32767.0  # Maximum positive value for signed 16-bit integer
+INT16_SCALE = 32768.0  # Scale factor for int16 ↔ float32 conversion (2^15)
 
 
 class AudioEngine:
@@ -77,13 +85,12 @@ class AudioEngine:
     def _initialize_encoder(self):
         """Initialize the encoding backend."""
         try:
-            if self.encoder_backend == "ggwave_wheels":
-                # ggwave-wheels uses functional API, init returns instance handle
-                self.encoder_instance = ggwave.init(ggwave.getDefaultParameters())
-                logger.info(f"ggwave-wheels initialized successfully")
-            elif self.encoder_backend == "ggwave_python":
-                self.encoder_instance = GGWave()
-                logger.info("ggwave-python initialized successfully")
+            if self.encoder_backend == "ggwave_cpp":
+                # gyges_cpp binary doesn't need initialization, just verify it exists
+                if not GYGES_CPP_PATH or not GYGES_CPP_PATH.exists():
+                    raise RuntimeError("gyges_cpp binary not found")
+                self.encoder_instance = True
+                logger.info(f"Using gyges_cpp binary at {GYGES_CPP_PATH}")
             elif self.encoder_backend == "simple_fsk":
                 # Simple FSK doesn't need instance
                 self.encoder_instance = True
@@ -129,10 +136,10 @@ class AudioEngine:
         try:
             if encoder_to_use == "simple_fsk":
                 return self._encode_simple_fsk(data, fsk_params), "simple_fsk"
-            elif encoder_to_use in ["ggwave_wheels", "ggwave_python"]:
-                return self._encode_ggwave(data, ggwave_params)
-            elif self.encoder_backend in ["ggwave_wheels", "ggwave_python"]:
-                return self._encode_ggwave(data, ggwave_params)
+            elif encoder_to_use == "ggwave_cpp" or encoder_to_use == "ggwave":
+                return self._encode_ggwave_cpp(data, ggwave_params)
+            elif self.encoder_backend == "ggwave_cpp":
+                return self._encode_ggwave_cpp(data, ggwave_params)
             elif self.encoder_backend == "simple_fsk":
                 return self._encode_simple_fsk(data, fsk_params), "simple_fsk"
             else:
@@ -141,8 +148,8 @@ class AudioEngine:
             logger.error(f"Failed to encode data: {e}")
             raise
     
-    def _encode_ggwave(self, data: bytes, ggwave_params: dict = None) -> Tuple[np.ndarray, str]:
-        """Encode using ggwave backend.
+    def _encode_ggwave_cpp(self, data: bytes, ggwave_params: dict = None) -> Tuple[np.ndarray, str]:
+        """Encode using gyges_cpp binary.
         
         Returns:
             Tuple of (audio_samples, encoder_used)
@@ -153,46 +160,65 @@ class AudioEngine:
         # ggwave has a hardcoded 140-byte limit
         GGWAVE_MAX_BYTES = 140
         
-        # Convert bytes to string if needed
-        if isinstance(data, bytes):
-            try:
-                message = data.decode('utf-8')
-            except UnicodeDecodeError:
-                # For binary data, encode as base64
-                message = base64.b64encode(data).decode('utf-8')
-        else:
-            message = str(data)
+        # Check size before encoding
+        if len(data) > GGWAVE_MAX_BYTES:
+            raise ValueError(f"Data too large for GGWave: {len(data)} bytes (max {GGWAVE_MAX_BYTES} bytes). Please use FSK encoder instead.")
         
-        # Check if message exceeds ggwave limit
-        if len(message) > GGWAVE_MAX_BYTES:
-            raise ValueError(f"Data too large for GGWave: {len(message)} bytes (max {GGWAVE_MAX_BYTES} bytes). Please use FSK encoder instead.")
+        # Create temporary files for input and output
+        with tempfile.NamedTemporaryFile(mode='wb', delete=False, suffix='.dat') as input_file:
+            input_file.write(data)
+            input_path = input_file.name
         
-        if self.encoder_backend == "ggwave_wheels":
-            # ggwave-wheels functional API
-            # Use custom params or config defaults
-            protocol_id = ggwave_params.get('protocol', config.ggwave.protocol_id)
+        output_path = input_path.replace('.dat', '.wav')
+        
+        try:
+            # Build command
+            protocol = ggwave_params.get('protocol', config.ggwave.protocol_id)
             volume = ggwave_params.get('volume', config.ggwave.volume)
-            waveform = ggwave.encode(message, protocolId=protocol_id, volume=volume, instance=self.encoder_instance)
+            sample_rate = config.audio.sample_rate
             
-            # Convert to numpy array (16-bit signed int, then to float32 in range [-1, 1])
-            audio_samples = np.frombuffer(waveform, dtype=np.int16).astype(np.float32) / 32768.0
-        else:
-            # ggwave-python class-based API
-            protocol_map = {
-                0: ProtocolId.AUDIBLE_NORMAL,
-                1: ProtocolId.AUDIBLE_FAST,
-                2: ProtocolId.AUDIBLE_FASTEST,
-            }
-            protocol = protocol_map.get(config.ggwave.protocol_id, ProtocolId.AUDIBLE_FAST)
+            cmd = [
+                str(GYGES_CPP_PATH),
+                input_path,
+                '--method', 'ggwave',
+                '--output', output_path,
+                '--protocol', str(protocol),
+                '--volume', str(volume),
+                '--sample-rate', str(sample_rate)
+            ]
             
-            waveform = self.encoder_instance.encode(message, protocol, volume=config.ggwave.volume)
-            audio_samples = np.array(waveform, dtype=np.float32)
-        
-        # Normalize to [-1, 1] range if needed
-        if audio_samples.max() > 1.0 or audio_samples.min() < -1.0:
-            audio_samples = audio_samples / 32767.0
-        
-        return audio_samples, self.encoder_backend
+            logger.info(f"Running gyges_cpp: {' '.join(cmd)}")
+            
+            # Run the binary
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                check=True
+            )
+            
+            logger.info(f"gyges_cpp output: {result.stdout}")
+            
+            # Read the generated WAV file as bytes
+            with open(output_path, 'rb') as f:
+                wav_bytes = f.read()
+            
+            audio_samples, _ = self.import_from_wav(wav_bytes)
+            
+            return audio_samples, "ggwave_cpp"
+            
+        except subprocess.CalledProcessError as e:
+            logger.error(f"gyges_cpp failed: {e.stderr}")
+            raise RuntimeError(f"GGWave encoding failed: {e.stderr}")
+        finally:
+            # Clean up temporary files
+            try:
+                if os.path.exists(input_path):
+                    os.unlink(input_path)
+                if os.path.exists(output_path):
+                    os.unlink(output_path)
+            except Exception as e:
+                logger.warning(f"Failed to clean up temp files: {e}")
     
     
     def _encode_simple_fsk(self, data: bytes, fsk_params: dict = None) -> np.ndarray:
@@ -287,7 +313,7 @@ class AudioEngine:
         header.extend(b'GYGES')
         
         # Encoder type (1 byte)
-        encoder_map = {'simple_fsk': 0, 'ggwave_wheels': 1, 'ggwave_python': 1}
+        encoder_map = {'simple_fsk': 0, 'ggwave_cpp': 1}
         header.append(encoder_map.get(encoder_type, 0))
         
         # FSK parameters (if FSK)
@@ -310,50 +336,9 @@ class AudioEngine:
         return bytes(header)
     
     def decode_ggwave(self, audio_samples: np.ndarray) -> Tuple[Optional[bytes], Dict[str, Any]]:
-        """Decode using ggwave backend."""
-        if self.encoder_backend not in ["ggwave_wheels", "ggwave_python"]:
-            return None, {'error': 'ggwave not available'}
-        
-        try:
-            if self.encoder_backend == "ggwave_wheels":
-                # ggwave-wheels functional API - expects int16 samples
-                # Signature: decode(instance, waveform) - instance comes FIRST
-                # Clip to prevent overflow
-                audio_clipped = np.clip(audio_samples, -1.0, 1.0)
-                audio_int16 = (audio_clipped * 32768.0).astype(np.int16)
-                waveform_bytes = audio_int16.tobytes()
-                decoded_text = ggwave.decode(self.encoder_instance, waveform_bytes)
-            else:
-                # ggwave-python class-based API
-                waveform = audio_samples.tolist()
-                decoded_text = self.encoder_instance.decode(waveform)
-            
-            if decoded_text:
-                # ggwave can return either str or bytes depending on version
-                if isinstance(decoded_text, bytes):
-                    decoded_bytes = decoded_text
-                else:
-                    # It's a string - try to decode from base64
-                    # (we base64-encode binary data during _encode_ggwave)
-                    try:
-                        decoded_bytes = base64.b64decode(decoded_text)
-                        logger.info(f"Successfully decoded base64: {len(decoded_text)} chars -> {len(decoded_bytes)} bytes")
-                    except Exception as e:
-                        # Not base64, treat as plain text
-                        logger.info(f"Not base64 (treating as text): {e}")
-                        decoded_bytes = decoded_text.encode('utf-8')
-                
-                decode_info = {
-                    'confidence': 1.0,
-                    'encoder': self.encoder_backend
-                }
-                return decoded_bytes, decode_info
-            else:
-                return None, {'error': 'No data decoded'}
-                
-        except Exception as e:
-            logger.error(f"ggwave decode failed: {e}")
-            return None, {'error': str(e)}
+        """Decode using ggwave - NOT AVAILABLE (gyges_cpp binary only supports encoding)."""
+        logger.warning("GGWave decoding not available with gyges_cpp binary")
+        return None, {'error': 'GGWave decoding not available (gyges_cpp binary only supports encoding)'}
     
     
     def decode_simple_fsk(self, audio_samples: np.ndarray, 
@@ -489,7 +474,7 @@ class AudioEngine:
                                   fsk_params: dict = None) -> Tuple[Optional[bytes], Dict[str, Any]]:
         """
         Decode audio with automatic decoder detection.
-        Tries ggwave first, then FSK.
+        Currently only supports FSK (ggwave decoding not available with gyges_cpp binary).
         
         Args:
             audio_samples: Audio samples to decode
@@ -498,16 +483,8 @@ class AudioEngine:
         Returns:
             Tuple of (decoded_data, decode_info)
         """
-        # Try ggwave first if available
-        if self.encoder_backend in ["ggwave_wheels", "ggwave_python"]:
-            try:
-                decoded, info = self.decode_ggwave(audio_samples)
-                if decoded and len(decoded) > 0:
-                    logger.info(f"GGWave decode successful, confidence: {info.get('confidence', 0)}")
-                    info['encoder'] = 'ggwave'
-                    return decoded, info
-            except Exception as e:
-                logger.debug(f"GGWave decode failed: {e}")
+        # Note: GGWave decoding not available with gyges_cpp binary
+        # Only FSK decoding is supported
         
         # Try FSK with provided or default parameters
         try:
@@ -523,7 +500,7 @@ class AudioEngine:
             return decoded, info
         except Exception as e:
             logger.error(f"FSK decode failed: {e}")
-            return None, {'error': 'All decoders failed'}
+            return None, {'error': 'FSK decode failed'}
     
     
     def export_to_wav(self, audio_samples: np.ndarray, sample_rate: int = None) -> bytes:
@@ -544,8 +521,8 @@ class AudioEngine:
         if audio_samples.dtype == np.float32 or audio_samples.dtype == np.float64:
             # Ensure samples are in range [-1, 1]
             audio_samples = np.clip(audio_samples, -1.0, 1.0)
-            # Convert to int16
-            audio_int16 = (audio_samples * 32767).astype(np.int16)
+            # Convert to int16 (use INT16_SCALE for full dynamic range)
+            audio_int16 = (audio_samples * INT16_SCALE).astype(np.int16)
         else:
             audio_int16 = audio_samples.astype(np.int16)
         
@@ -592,7 +569,7 @@ class AudioEngine:
                 raise ValueError(f"Unsupported sample width: {sample_width}")
             
             # Convert to float32 [-1, 1]
-            audio_float = audio_int16.astype(np.float32) / 32767.0
+            audio_float = audio_int16.astype(np.float32) / INT16_SCALE
             
             # Handle multi-channel audio (convert to mono)
             if n_channels > 1:
@@ -612,8 +589,8 @@ class AudioEngine:
                 if audio_samples is None:  # Shutdown signal
                     break
                 
-                # Convert float32 to int16 for playback  
-                audio_int16 = (audio_samples * 32768.0).astype(np.int16)
+                # Convert float32 to int16 for playback (with clipping to prevent overflow)
+                audio_int16 = (np.clip(audio_samples, -1.0, 1.0) * INT16_SCALE).astype(np.int16)
                 
                 # Open audio stream if not already open
                 if PYAUDIO_AVAILABLE:
@@ -761,8 +738,7 @@ class AudioEngine:
                 self.audio_stream.close()
             if self.pyaudio_instance:
                 self.pyaudio_instance.terminate()
-        if self.encoder_backend in ["ggwave_wheels", "ggwave_python"] and self.encoder_instance:
-            self.encoder_instance.free()
+        # No cleanup needed for ggwave_cpp (binary-based)
 
 
 # Global audio engine instance

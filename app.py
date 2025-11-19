@@ -274,7 +274,7 @@ def get_encoders():
             logger.info(f"Current encoder backend: {current_backend}")
             
             # Add available backends as options
-            if audio_engine.encoder_backend in ['ggwave_wheels', 'ggwave_python']:
+            if audio_engine.encoder_backend == 'ggwave_cpp':
                 encoders.append('ggwave')
             
         else:
