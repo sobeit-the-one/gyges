@@ -9,19 +9,16 @@ This project supports multiple encoding backends with automatic fallback. You do
    pip install -r requirements.txt
    ```
 
-2. **Install an encoding backend (try in this order):**
+2. **Install GGWave support (optional, for GGWave encoding/decoding):**
    
-   **Option 1 (Recommended):** `ggwave-wheels` - Most reliable
-   ```bash
-   pip install ggwave-wheels
-   ```
+   GGWave functionality requires the `gyges_encoder.exe` and `gyges_decoder.exe` binaries:
+   - Build them from the C++ source (see `bin/README.md` for build instructions)
+   - Place both binaries in one of these directories:
+     - `bin/Release/`
+     - `bin/Debug/`
+     - `bin/MinSizeRel/`
    
-   **Option 2:** `ggwave-python` - Alternative ggwave package
-   ```bash
-   pip install ggwave-python
-   ```
-   
-   **Option 3:** None - The code includes a simple FSK fallback that works without any additional packages (basic functionality)
+   **Note:** If the binaries are not found, the code will automatically use a simple FSK fallback that works without any additional packages (basic functionality)
 
 3. **Install an audio playback library (install one):**
    
@@ -51,10 +48,10 @@ Then open your browser to `http://localhost:5000` (or your Pi's IP address if ru
 
 ## Troubleshooting
 
-### If ggwave packages won't install:
+### If GGWave binaries are not available:
 - The code will automatically fall back to a simple FSK encoder
-- This works but is slower and less robust than ggwave
-- For best results, try `ggwave-wheels` first as it's the most compatible
+- FSK works but is slower and less robust than GGWave
+- To enable GGWave, build the binaries from source (see `bin/README.md`)
 
 ### If pyaudio won't install:
 - Try `sounddevice` instead: `pip install sounddevice`
@@ -67,9 +64,8 @@ Then open your browser to `http://localhost:5000` (or your Pi's IP address if ru
 ## Backend Priority
 
 The system tries backends in this order:
-1. `ggwave-wheels` (best compatibility)
-2. `ggwave-python` (alternative)
-4. Simple FSK (always works, basic functionality)
+1. **GGWave** (via `gyges_encoder.exe` and `gyges_decoder.exe` binaries) - Best quality, 140 bytes max
+2. **Simple FSK** (always works, basic functionality) - Up to ~6.5KB, configurable
 
-The first available backend will be used automatically.
+The first available backend will be used automatically. If GGWave binaries are not found, FSK will be used as a fallback.
 
