@@ -317,6 +317,12 @@
                 formData.append('fsk_freq_1', document.getElementById('freq-1').value);
             }
             
+            // Add GGWave parameters if GGWave decoder is selected or auto
+            if (decodeMethod === 'ggwave' || decodeMethod === 'auto') {
+                // GGWave decoder uses 48kHz sample rate by default
+                formData.append('ggwave_sample_rate', '48000');
+            }
+            
             fetch('/decode', {
                 method: 'POST',
                 body: formData

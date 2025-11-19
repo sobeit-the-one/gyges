@@ -495,6 +495,11 @@ def decode():
         if request.form.get('fsk_freq_1'):
             fsk_params['freq_1'] = int(request.form.get('fsk_freq_1'))
         
+        # Get GGWave decode parameters from form
+        ggwave_params = {}
+        if request.form.get('ggwave_sample_rate'):
+            ggwave_params['ggwave_sample_rate'] = int(request.form.get('ggwave_sample_rate'))
+        
         # Read audio file
         audio_bytes = audio_file.read()
         
@@ -503,7 +508,7 @@ def decode():
         
         # Decode based on selected method
         if decoder_method == 'ggwave':
-            decoded_data, decode_info = audio_engine.decode_ggwave(audio_samples)
+            decoded_data, decode_info = audio_engine.decode_ggwave(audio_samples, ggwave_params=ggwave_params)
         elif decoder_method == 'simple_fsk':
             decoded_data, decode_info = audio_engine.decode_simple_fsk(
                 audio_samples,
@@ -513,7 +518,11 @@ def decode():
             )
         else:
             # Auto-detect: try all decoders
-            decoded_data, decode_info = audio_engine.decode_with_auto_detect(audio_samples, fsk_params=fsk_params)
+            decoded_data, decode_info = audio_engine.decode_with_auto_detect(
+                audio_samples, 
+                fsk_params=fsk_params,
+                ggwave_params=ggwave_params
+            )
         
         if decoded_data is None:
             return jsonify({

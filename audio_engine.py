@@ -9,6 +9,7 @@ import wave
 import subprocess
 import tempfile
 import os
+import json
 from pathlib import Path
 from typing import Optional, Callable, Tuple, Dict, Any
 import numpy as np
@@ -30,27 +31,28 @@ except ImportError:
 # Encoder backend detection
 ENCODER_BACKEND = None
 
-# Check for gyges_cpp.exe binary (for ggwave encoding)
-GYGES_CPP_PATH = None
-possible_paths = [
-    Path(__file__).parent / "bin" / "Release" / "gyges_cpp.exe",
-    Path(__file__).parent / "bin" / "Debug" / "gyges_cpp.exe",
-    Path(__file__).parent / "bin" / "MinSizeRel" / "gyges_cpp.exe",
-]
+# Check for gyges_encoder.exe and gyges_decoder.exe binaries (for ggwave encoding/decoding)
+GYGES_ENCODER_PATH = None
+GYGES_DECODER_PATH = None
 
-for path in possible_paths:
-    if path.exists():
-        GYGES_CPP_PATH = path
+possible_dirs = ["Release", "Debug", "MinSizeRel"]
+for dir_name in possible_dirs:
+    encoder_path = Path(__file__).parent / "bin" / dir_name / "gyges_encoder.exe"
+    decoder_path = Path(__file__).parent / "bin" / dir_name / "gyges_decoder.exe"
+    
+    if encoder_path.exists() and decoder_path.exists():
+        GYGES_ENCODER_PATH = encoder_path
+        GYGES_DECODER_PATH = decoder_path
         ENCODER_BACKEND = "ggwave_cpp"
         logger = logging.getLogger(__name__)
-        logger.info(f"Found gyges_cpp binary at {path}")
+        logger.info(f"Found gyges binaries: encoder={encoder_path}, decoder={decoder_path}")
         break
 
 if ENCODER_BACKEND is None:
     # Fallback to simple FSK encoding
     ENCODER_BACKEND = "simple_fsk"
     logger = logging.getLogger(__name__)
-    logger.warning("No gyges_cpp binary found. Using simple FSK encoding only.")
+    logger.warning("No gyges binaries found. Using simple FSK encoding only.")
 
 from config import config
 
@@ -86,11 +88,13 @@ class AudioEngine:
         """Initialize the encoding backend."""
         try:
             if self.encoder_backend == "ggwave_cpp":
-                # gyges_cpp binary doesn't need initialization, just verify it exists
-                if not GYGES_CPP_PATH or not GYGES_CPP_PATH.exists():
-                    raise RuntimeError("gyges_cpp binary not found")
+                # gyges binaries don't need initialization, just verify they exist
+                if not GYGES_ENCODER_PATH or not GYGES_ENCODER_PATH.exists():
+                    raise RuntimeError("gyges_encoder binary not found")
+                if not GYGES_DECODER_PATH or not GYGES_DECODER_PATH.exists():
+                    raise RuntimeError("gyges_decoder binary not found")
                 self.encoder_instance = True
-                logger.info(f"Using gyges_cpp binary at {GYGES_CPP_PATH}")
+                logger.info(f"Using gyges binaries: encoder={GYGES_ENCODER_PATH}, decoder={GYGES_DECODER_PATH}")
             elif self.encoder_backend == "simple_fsk":
                 # Simple FSK doesn't need instance
                 self.encoder_instance = True
@@ -149,7 +153,7 @@ class AudioEngine:
             raise
     
     def _encode_ggwave_cpp(self, data: bytes, ggwave_params: dict = None) -> Tuple[np.ndarray, str]:
-        """Encode using gyges_cpp binary.
+        """Encode using gyges_encoder binary.
         
         Returns:
             Tuple of (audio_samples, encoder_used)
@@ -178,16 +182,17 @@ class AudioEngine:
             sample_rate = config.audio.sample_rate
             
             cmd = [
-                str(GYGES_CPP_PATH),
+                str(GYGES_ENCODER_PATH),
                 input_path,
                 '--method', 'ggwave',
                 '--output', output_path,
                 '--protocol', str(protocol),
                 '--volume', str(volume),
-                '--sample-rate', str(sample_rate)
+                '--sample-rate', str(sample_rate),
+                '--json'  # Use JSON output for easier parsing
             ]
             
-            logger.info(f"Running gyges_cpp: {' '.join(cmd)}")
+            logger.info(f"Running gyges_encoder: {' '.join(cmd)}")
             
             # Run the binary
             result = subprocess.run(
@@ -197,7 +202,19 @@ class AudioEngine:
                 check=True
             )
             
-            logger.info(f"gyges_cpp output: {result.stdout}")
+            # Parse JSON output (stdout) or log errors (stderr)
+            if result.stdout:
+                try:
+                    output_json = json.loads(result.stdout)
+                    if output_json.get('success') == 'true':
+                        logger.info(f"gyges_encoder success: {output_json}")
+                    else:
+                        logger.error(f"gyges_encoder failed: {output_json}")
+                except json.JSONDecodeError:
+                    logger.warning(f"gyges_encoder non-JSON output: {result.stdout}")
+            
+            if result.stderr:
+                logger.info(f"gyges_encoder stderr: {result.stderr}")
             
             # Read the generated WAV file as bytes
             with open(output_path, 'rb') as f:
@@ -208,8 +225,16 @@ class AudioEngine:
             return audio_samples, "ggwave_cpp"
             
         except subprocess.CalledProcessError as e:
-            logger.error(f"gyges_cpp failed: {e.stderr}")
-            raise RuntimeError(f"GGWave encoding failed: {e.stderr}")
+            logger.error(f"gyges_encoder failed: {e.stderr}")
+            # Try to parse JSON error if available
+            error_msg = e.stderr
+            try:
+                if e.stdout:
+                    error_json = json.loads(e.stdout)
+                    error_msg = error_json.get('error', error_msg)
+            except:
+                pass
+            raise RuntimeError(f"GGWave encoding failed: {error_msg}")
         finally:
             # Clean up temporary files
             try:
@@ -335,10 +360,119 @@ class AudioEngine:
         
         return bytes(header)
     
-    def decode_ggwave(self, audio_samples: np.ndarray) -> Tuple[Optional[bytes], Dict[str, Any]]:
-        """Decode using ggwave - NOT AVAILABLE (gyges_cpp binary only supports encoding)."""
-        logger.warning("GGWave decoding not available with gyges_cpp binary")
-        return None, {'error': 'GGWave decoding not available (gyges_cpp binary only supports encoding)'}
+    def decode_ggwave(self, audio_samples: np.ndarray, ggwave_params: dict = None) -> Tuple[Optional[bytes], Dict[str, Any]]:
+        """Decode using gyges_decoder binary."""
+        if not GYGES_DECODER_PATH or not GYGES_DECODER_PATH.exists():
+            return None, {'error': 'gyges_decoder binary not found'}
+        
+        if ggwave_params is None:
+            ggwave_params = {}
+        
+        # Export audio samples to temporary WAV file
+        with tempfile.NamedTemporaryFile(mode='wb', delete=False, suffix='.wav') as wav_file:
+            wav_bytes = self.export_to_wav(audio_samples)
+            wav_file.write(wav_bytes)
+            input_wav_path = wav_file.name
+        
+        output_path = input_wav_path.replace('.wav', '_decoded.bin')
+        
+        try:
+            # Build command for gyges_decoder
+            # Note: decoder requires -m (method) and -o (output) as required args
+            sample_rate = ggwave_params.get('ggwave_sample_rate', 48000)  # GGWave default is 48kHz
+            
+            cmd = [
+                str(GYGES_DECODER_PATH),
+                input_wav_path,
+                '--method', 'ggwave',
+                '--output', output_path,
+                '--ggwave-sample-rate', str(sample_rate),
+                '--json'  # Use JSON output for easier parsing
+            ]
+            
+            logger.info(f"Running gyges_decoder: {' '.join(cmd)}")
+            
+            # Run the binary
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                check=True
+            )
+            
+            # Parse JSON output
+            success = False
+            error_msg = None
+            
+            if result.stdout:
+                try:
+                    output_json = json.loads(result.stdout)
+                    success = output_json.get('success') == 'true' or output_json.get('success') == True
+                    if not success:
+                        error_msg = output_json.get('error', output_json.get('error_code', 'Unknown error'))
+                        logger.error(f"gyges_decoder JSON indicates failure: {error_msg}")
+                        # Don't return yet - check if file was created anyway
+                except json.JSONDecodeError as e:
+                    logger.warning(f"gyges_decoder non-JSON output: {result.stdout}")
+                    # If JSON parsing fails, check stderr for error info
+                    if not result.stderr:
+                        error_msg = f"Invalid JSON response: {result.stdout[:100]}"
+            
+            # Check stderr for additional error info
+            if result.stderr:
+                logger.info(f"gyges_decoder stderr: {result.stderr}")
+                if not error_msg:
+                    # Use stderr if we don't have an error from JSON
+                    error_msg = result.stderr.strip()
+            
+            # Check if decoded file exists
+            if os.path.exists(output_path):
+                with open(output_path, 'rb') as f:
+                    decoded_bytes = f.read()
+                
+                if len(decoded_bytes) == 0:
+                    return None, {'error': error_msg or 'Decoded file is empty'}
+                
+                decode_info = {
+                    'confidence': 1.0,
+                    'encoder': 'ggwave_cpp'
+                }
+                return decoded_bytes, decode_info
+            else:
+                # File doesn't exist - return the error message we found
+                return None, {'error': error_msg or 'Decoded file not created'}
+                
+        except subprocess.CalledProcessError as e:
+            logger.error(f"gyges_decoder subprocess failed with code {e.returncode}")
+            logger.error(f"stdout: {e.stdout}")
+            logger.error(f"stderr: {e.stderr}")
+            
+            # Try to parse JSON error if available
+            error_msg = e.stderr or e.stdout or f'Process exited with code {e.returncode}'
+            try:
+                if e.stdout:
+                    error_json = json.loads(e.stdout)
+                    error_msg = error_json.get('error', error_json.get('error_code', error_msg))
+            except:
+                # If JSON parsing fails, use stderr or stdout
+                if e.stderr:
+                    error_msg = e.stderr.strip()
+                elif e.stdout:
+                    error_msg = e.stdout.strip()
+            
+            return None, {'error': f'GGWave decoding failed: {error_msg}'}
+        except Exception as e:
+            logger.error(f"Unexpected error in decode_ggwave: {e}", exc_info=True)
+            return None, {'error': f'Unexpected error: {str(e)}'}
+        finally:
+            # Clean up temporary files
+            try:
+                if os.path.exists(input_wav_path):
+                    os.unlink(input_wav_path)
+                if os.path.exists(output_path):
+                    os.unlink(output_path)
+            except Exception as e:
+                logger.warning(f"Failed to clean up temp files: {e}")
     
     
     def decode_simple_fsk(self, audio_samples: np.ndarray, 
@@ -471,20 +605,30 @@ class AudioEngine:
         return bit_value, confidence
     
     def decode_with_auto_detect(self, audio_samples: np.ndarray, 
-                                  fsk_params: dict = None) -> Tuple[Optional[bytes], Dict[str, Any]]:
+                                  fsk_params: dict = None,
+                                  ggwave_params: dict = None) -> Tuple[Optional[bytes], Dict[str, Any]]:
         """
         Decode audio with automatic decoder detection.
-        Currently only supports FSK (ggwave decoding not available with gyges_cpp binary).
+        Tries GGWave first (if available), then FSK.
         
         Args:
             audio_samples: Audio samples to decode
             fsk_params: FSK parameters to use if FSK decoder is tried
+            ggwave_params: GGWave parameters to use if GGWave decoder is tried
         
         Returns:
             Tuple of (decoded_data, decode_info)
         """
-        # Note: GGWave decoding not available with gyges_cpp binary
-        # Only FSK decoding is supported
+        # Try GGWave first if available
+        if self.encoder_backend == "ggwave_cpp" and GYGES_DECODER_PATH:
+            try:
+                decoded, info = self.decode_ggwave(audio_samples, ggwave_params)
+                if decoded and len(decoded) > 0:
+                    logger.info(f"GGWave decode successful")
+                    info['encoder'] = 'ggwave_cpp'
+                    return decoded, info
+            except Exception as e:
+                logger.debug(f"GGWave decode failed: {e}")
         
         # Try FSK with provided or default parameters
         try:
@@ -500,7 +644,7 @@ class AudioEngine:
             return decoded, info
         except Exception as e:
             logger.error(f"FSK decode failed: {e}")
-            return None, {'error': 'FSK decode failed'}
+            return None, {'error': 'All decoders failed'}
     
     
     def export_to_wav(self, audio_samples: np.ndarray, sample_rate: int = None) -> bytes:
