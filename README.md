@@ -75,6 +75,26 @@ A Python web application that encodes data into audio waveforms and decodes audi
   - Lower bit duration = more data fits, but faster transmission
 - **Audio Quality**: Clean recordings work best for decoding
 
+## Screenshots
+
+### Encoder Settings
+
+![Encoder Settings](img/0.png)
+
+*Configure encoding parameters for GGWave or FSK encoding*
+
+### Decoder Settings
+
+![Decoder Settings](img/1.png)
+
+*Upload WAV files and configure decoder parameters*
+
+### History
+
+![History](img/2.png)
+
+*View all encoding and decoding operations with download options*
+
 ## Documentation
 
 See [INSTALL.md](INSTALL.md) for detailed installation instructions and troubleshooting.
